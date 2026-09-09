@@ -79,6 +79,58 @@
 #include <Protocol/SimpleTextIn.h>
 #include "SuperFbMenu.h"
 
+/*
+ * OPPO/OnePlus "Phoenix" boot watchdog (PhoenixDxe in the platform UEFI FV).
+ *
+ * PhoenixDxe arms a private one-shot timer during DXE - 60 s on a normal boot -
+ * and resets the device if the boot has not reached Android when it fires. That
+ * timer is an event of its own, not the UEFI watchdog timer architectural
+ * protocol, so the gBS->SetWatchdogTimer() disarm the fastboot path performs
+ * cannot cancel it. Sitting in the boot menu or in the on-device fastboot
+ * screen for longer than the timeout therefore reboots the device.
+ *
+ * The driver also installs a protocol whose third method cancels the timer
+ * (SetTimer(TimerCancel) + CloseEvent). Calling it keeps the menu alive for as
+ * long as the user needs. Boot modes the handler treats as "not normal" (the
+ * official fastboot) are ignored by Phoenix anyway, which is why only the menu
+ * and the superfastboot fastboot screen were affected.
+ *
+ * The layout below was recovered from the shipped PhoenixDxe binary: interface
+ * table at image offset 0x9158, DisableTimer at +0x18 (code at 0x1c88).
+ */
+#define PHOENIX_PROTOCOL_GUID \
+  { 0x7D2A39F3, 0x0F8C, 0x47A0, { 0x9B, 0x51, 0xF2, 0x69, 0xB4, 0xBA, 0xF9, 0x93 } }
+
+typedef struct {
+  UINT64                     Version;                   /* +0x00 */
+  VOID                       *Reserved0;                /* +0x08 */
+  VOID                       *Reserved1;                /* +0x10 */
+  EFI_STATUS (EFIAPI         *DisableTimer) (VOID);     /* +0x18 */
+  VOID                       *Reserved2;                /* +0x20 */
+} PHOENIX_PROTOCOL;
+
+/*
+ * Cancel the Phoenix boot watchdog when the platform provides it. A missing
+ * protocol is normal on devices without Phoenix, so log it at INFO level only.
+ */
+STATIC
+VOID
+SfbDisablePhoenixWatchdog (VOID)
+{
+  EFI_GUID          PhoenixGuid = PHOENIX_PROTOCOL_GUID;
+  PHOENIX_PROTOCOL  *Phoenix = NULL;
+  EFI_STATUS        Status;
+
+  Status = gBS->LocateProtocol (&PhoenixGuid, NULL, (VOID **)&Phoenix);
+  if (EFI_ERROR (Status) || Phoenix == NULL || Phoenix->DisableTimer == NULL) {
+    DEBUG ((EFI_D_INFO, "SFB: phoenix watchdog not present: %r\n", Status));
+    return;
+  }
+
+  Status = Phoenix->DisableTimer ();
+  DEBUG ((EFI_D_INFO, "SFB: phoenix watchdog disable -> %r\n", Status));
+}
+
 #define MAX_APP_STR_LEN 64
 #define MAX_NUM_FS 10
 #define DEFAULT_STACK_CHK_GUARD 0xc0c0c0c0
@@ -202,6 +254,13 @@ LinuxLoaderEntry (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
          (UINTN)LinuxLoaderEntry & (~ (0xFFF))));
   DEBUG ((EFI_D_VERBOSE, "LinuxLoaderEntry Address: 0x%llx\n",
          (UINTN)LinuxLoaderEntry));
+
+  /*
+   * The boot menu and the on-device fastboot screen can sit idle for minutes;
+   * Phoenix's boot watchdog resets the device once its timeout expires, so drop
+   * it before any interactive screen is shown.
+   */
+  SfbDisablePhoenixWatchdog ();
 
   Status = InitThreadUnsafeStack ();
 
