@@ -9,6 +9,7 @@
  */
 
 #include "SuperFbMenu.h"
+#include "SuperFbGfx.h"
 
 #include <Library/BaseLib.h>
 #include <Library/BaseMemoryLib.h>
@@ -28,6 +29,189 @@ CONST CHAR8 *gSfbMenuModuleTag = "SuperFbMenu";
 #define SFB_MENU_CREDIT  L"gbl_root_canoe 6.3.5 by 1vivy"
 #define SFB_ATTR_SELECTED  EFI_TEXT_ATTR (EFI_BLACK, EFI_LIGHTGRAY)
 #define SFB_ATTR_TITLE     EFI_TEXT_ATTR (EFI_WHITE, EFI_BLACK)
+
+/* ---- graphical menu ----------------------------------------------------- */
+
+#define SFB_CLR_BG       SFB_RGB (0x0A, 0x0E, 0x13)
+#define SFB_CLR_BAND     SFB_RGB (0x11, 0x17, 0x20)
+#define SFB_CLR_RULE     SFB_RGB (0x2E, 0xC4, 0x8A)
+#define SFB_CLR_TEXT     SFB_RGB (0xE9, 0xEF, 0xF5)
+#define SFB_CLR_DIM      SFB_RGB (0x8E, 0x9C, 0xAB)
+#define SFB_CLR_SEL_BG   SFB_RGB (0x1A, 0x2A, 0x3A)
+#define SFB_CLR_SEL_TEXT SFB_RGB (0xFF, 0xFF, 0xFF)
+#define SFB_CLR_MARK     SFB_RGB (0x2E, 0xC4, 0x8A)
+
+/* True while the current screen is drawn into the framebuffer. */
+STATIC BOOLEAN  mGfxUi;
+STATIC UINTN    mGfxPad;
+STATIC UINTN    mGfxHeaderH;
+STATIC UINTN    mGfxContentTop;
+STATIC UINTN    mGfxContentBottom;
+STATIC UINTN    mGfxFooterY;
+STATIC UINTN    mGfxRowSlot;
+STATIC UINTN    mGfxRowBarH;
+STATIC UINTN    mGfxRowIndex;
+STATIC UINTN    mGfxScaleTitle;
+STATIC UINTN    mGfxScaleRow;
+STATIC UINTN    mGfxScaleHint;
+
+/* Largest integer scale whose text stays within Target pixels. */
+STATIC
+UINTN
+SfbGfxScaleFor (IN UINTN Target)
+{
+  UINTN  Cell  = SfbGfxTextHeight (1);
+  UINTN  Scale;
+
+  if (Cell == 0) {
+    return 1;
+  }
+
+  Scale = Target / Cell;
+  if (Scale < 1) {
+    Scale = 1;
+  }
+  if (Scale > 6) {
+    Scale = 6;
+  }
+  return Scale;
+}
+
+/*
+ * Derive the whole layout from the framebuffer size and the font cell, so the
+ * menu keeps its proportions on any panel. Returns FALSE when there is no
+ * framebuffer to draw into, which sends every caller back to console text.
+ */
+STATIC
+BOOLEAN
+SfbGfxLayout (VOID)
+{
+  UINTN  Height;
+  UINTN  SubtitleH;
+  UINTN  TitleH;
+  UINTN  FooterH;
+  UINTN  Slot;
+
+  mGfxUi = FALSE;
+  if (!SfbGfxReady ()) {
+    return FALSE;
+  }
+
+  Height = SfbGfxHeight ();
+  if (Height == 0) {
+    return FALSE;
+  }
+
+  mGfxPad        = Height / 64;
+  if (mGfxPad == 0) {
+    mGfxPad = 1;
+  }
+  mGfxScaleTitle = SfbGfxScaleFor (Height / 48);
+  mGfxScaleRow   = SfbGfxScaleFor (Height / 64);
+  mGfxScaleHint  = SfbGfxScaleFor (Height / 96);
+
+  TitleH    = SfbGfxTextHeight (mGfxScaleTitle);
+  SubtitleH = SfbGfxTextHeight (mGfxScaleHint);
+  mGfxHeaderH    = TitleH + SubtitleH + 3 * mGfxPad;
+  FooterH        = SubtitleH + 2 * mGfxPad;
+  mGfxContentTop = mGfxHeaderH;
+  mGfxContentBottom = (Height > mGfxHeaderH + FooterH + 4 * mGfxPad)
+                        ? (Height - FooterH) : (Height - mGfxPad);
+  mGfxFooterY    = Height - mGfxPad - SubtitleH;
+
+  if (mGfxContentBottom <= mGfxContentTop + 4 * mGfxPad) {
+    return FALSE;
+  }
+
+  Slot = (mGfxContentBottom - mGfxContentTop) / SFB_VISIBLE_ROWS;
+  if (Slot < SfbGfxTextHeight (1) + 2) {
+    return FALSE;
+  }
+
+  mGfxRowSlot = Slot;
+  mGfxRowBarH = SfbGfxTextHeight (mGfxScaleRow) + Slot / 5;
+  if (mGfxRowBarH > Slot) {
+    mGfxRowBarH = Slot;
+  }
+  mGfxRowIndex = 0;
+  mGfxUi = TRUE;
+  return TRUE;
+}
+
+/* Top of the bar for the row that SfbDrawRow is about to draw. */
+STATIC
+UINTN
+SfbGfxRowTop (VOID)
+{
+  return mGfxContentTop + mGfxRowIndex * mGfxRowSlot +
+         (mGfxRowSlot - mGfxRowBarH) / 2;
+}
+
+/*
+ * Widest line the menu may use, leaving the side margins alone, plus the
+ * helpers that keep every string inside it.
+ */
+STATIC
+UINTN
+SfbGfxTextMaxWidth (VOID)
+{
+  return (SfbGfxWidth () > 2 * mGfxPad) ? (SfbGfxWidth () - 2 * mGfxPad)
+                                        : SfbGfxWidth ();
+}
+
+/*
+ * Largest integer scale in [1, Preferred] whose line still fits MaxWidth.
+ * Keeping the text inside the panel matters more than keeping it large: the
+ * boot menu carries paths and volume labels that would otherwise run off the
+ * right edge.
+ */
+STATIC
+UINTN
+SfbGfxTextScale (IN CONST CHAR16 *Text, IN UINTN MaxWidth, IN UINTN Preferred)
+{
+  UINTN  Unit;
+
+  if (Text == NULL || Text[0] == L'\0') {
+    return 1;
+  }
+  if (Preferred == 0) {
+    Preferred = 1;
+  }
+
+  Unit = SfbGfxTextWidth (Text, 1);
+  if (Unit == 0) {
+    return Preferred;
+  }
+  if (Unit * Preferred <= MaxWidth) {
+    return Preferred;
+  }
+
+  Preferred = (MaxWidth > Unit) ? (MaxWidth / Unit) : 1;
+  return (Preferred == 0) ? 1 : Preferred;
+}
+
+/* Draw Text at the given position, shrinking it until it fits MaxWidth. */
+STATIC
+UINTN
+SfbGfxTextFit (IN UINTN X, IN UINTN Y, IN CONST CHAR16 *Text,
+               IN UINTN MaxWidth, IN UINTN Preferred, IN UINT32 Color)
+{
+  return SfbGfxText (X, Y, Text, SfbGfxTextScale (Text, MaxWidth, Preferred),
+                     Color);
+}
+
+/* Draw Text centred across the width, shrinking it when it would not fit. */
+VOID
+SfbGfxTextCentred (IN UINTN Y, IN CONST CHAR16 *Text, IN UINTN Scale,
+                   IN UINT32 Color)
+{
+  UINTN  MaxWidth = SfbGfxTextMaxWidth ();
+  UINTN  Use      = SfbGfxTextScale (Text, MaxWidth, Scale);
+  UINTN  Width    = SfbGfxTextWidth (Text, Use);
+  UINTN  X        = (SfbGfxWidth () > Width) ? (SfbGfxWidth () - Width) / 2 : 0;
+
+  SfbGfxText (X, Y, Text, Use, Color);
+}
 
 SFB_KEY
 SfbWaitForKey (IN UINT32 TimeoutMs)
@@ -134,6 +318,22 @@ SfbStrCaseEqual (IN CONST CHAR16 *Str1, IN CONST CHAR16 *Str2)
 VOID
 SfbBeginScreen (IN CONST CHAR16 *Title, IN CONST CHAR16 *Subtitle)
 {
+  if (SfbGfxLayout ()) {
+    SfbGfxClear (SFB_CLR_BG);
+    SfbGfxFillRect (0, 0, SfbGfxWidth (), mGfxHeaderH, SFB_CLR_BAND);
+    SfbGfxFillRect (0, mGfxHeaderH - mGfxPad / 4, SfbGfxWidth (),
+                    mGfxPad / 4 + 1, SFB_CLR_RULE);
+    SfbGfxTextFit (mGfxPad, mGfxPad, Title, SfbGfxTextMaxWidth (),
+                   mGfxScaleTitle, SFB_CLR_TEXT);
+    if (Subtitle != NULL) {
+      SfbGfxTextFit (mGfxPad,
+                     mGfxPad + SfbGfxTextHeight (mGfxScaleTitle) + mGfxPad / 2,
+                     Subtitle, SfbGfxTextMaxWidth (), mGfxScaleHint,
+                     SFB_CLR_DIM);
+    }
+    return;
+  }
+
   gST->ConOut->SetAttribute (gST->ConOut, SFB_ATTR_TITLE);
   gST->ConOut->ClearScreen (gST->ConOut);
   Print (L"%s\r\n", Title);
@@ -147,6 +347,15 @@ SfbBeginScreen (IN CONST CHAR16 *Title, IN CONST CHAR16 *Subtitle)
 VOID
 SfbEndScreen (IN CONST CHAR16 *Footer)
 {
+  if (mGfxUi) {
+    if (Footer != NULL) {
+      /* Centred so it reads as a hint line rather than as another entry. */
+      SfbGfxTextCentred (mGfxFooterY, Footer, mGfxScaleHint, SFB_CLR_DIM);
+    }
+    SfbGfxPresent ();
+    return;
+  }
+
   gST->ConOut->SetAttribute (gST->ConOut, SFB_ATTR_NORMAL);
   Print (L"\r\n%s\r\n", Footer);
 }
@@ -154,6 +363,41 @@ SfbEndScreen (IN CONST CHAR16 *Footer)
 VOID
 SfbDrawRow (IN BOOLEAN Selected, IN CONST CHAR16 *Marker, IN CONST CHAR16 *Text)
 {
+  UINTN  Top;
+  UINTN  TextY;
+  UINTN  X;
+
+  if (mGfxUi) {
+    Top   = SfbGfxRowTop ();
+    TextY = Top + (mGfxRowBarH - SfbGfxTextHeight (mGfxScaleRow)) / 2;
+    X     = mGfxPad;
+
+    if (Selected) {
+      SfbGfxRoundRect (mGfxPad / 2, Top, SfbGfxWidth () - mGfxPad,
+                       mGfxRowBarH, mGfxRowBarH / 2, SFB_CLR_SEL_BG);
+      SfbGfxFillRect (mGfxPad / 2, Top + mGfxRowBarH / 4, mGfxPad / 5 + 3,
+                      mGfxRowBarH / 2, SFB_CLR_MARK);
+    }
+
+    if (Marker != NULL && Marker[0] != L' ' && Marker[0] != L'\0') {
+      X += SfbGfxTextFit (X, TextY, Marker, SfbGfxTextMaxWidth (),
+                          mGfxScaleRow, SFB_CLR_MARK) + mGfxPad / 3;
+    } else {
+      X += SfbGfxTextWidth (L"  ", mGfxScaleRow);
+    }
+
+    if (Text != NULL) {
+      UINTN  Room = (SfbGfxWidth () > X + mGfxPad)
+                      ? (SfbGfxWidth () - X - mGfxPad) : 0;
+
+      SfbGfxTextFit (X, TextY, Text, Room, mGfxScaleRow,
+                     Selected ? SFB_CLR_SEL_TEXT : SFB_CLR_TEXT);
+    }
+
+    mGfxRowIndex++;
+    return;
+  }
+
   gST->ConOut->SetAttribute (gST->ConOut,
                              Selected ? SFB_ATTR_SELECTED : SFB_ATTR_NORMAL);
   Print (L"%s %s %s", Selected ? L">" : L" ", Marker, Text);
@@ -212,10 +456,43 @@ SfbMoveCursor (IN OUT UINTN *Cursor, IN UINTN Count, IN SFB_KEY Key)
   }
 }
 
+/* Centred title plus optional hint line, on the graphical screen. */
+STATIC
+VOID
+SfbGfxBanner (IN CONST CHAR16 *Title, IN CONST CHAR16 *Hint)
+{
+  UINTN  TitleH = SfbGfxTextHeight (mGfxScaleTitle);
+  UINTN  Y      = (SfbGfxHeight () > TitleH) ? (SfbGfxHeight () - TitleH) / 2 : 0;
+
+  SfbGfxClear (SFB_CLR_BG);
+  if (Title != NULL) {
+    SfbGfxTextCentred (Y, Title, mGfxScaleTitle, SFB_CLR_TEXT);
+  }
+  if (Hint != NULL) {
+    SfbGfxTextCentred (Y + TitleH + mGfxPad, Hint, mGfxScaleHint, SFB_CLR_DIM);
+  }
+  SfbGfxPresent ();
+}
+
 /* Report a failure and hold the screen until the user acknowledges it. */
 VOID
 SfbReportStatus (IN CONST CHAR16 *What, IN EFI_STATUS Status)
 {
+  if (SfbGfxLayout ()) {
+    CHAR16  Detail[64];
+    UINTN   Y = SfbGfxHeight () * 2 / 5;
+
+    SfbGfxClear (SFB_CLR_BG);
+    SfbGfxTextCentred (Y, What, mGfxScaleTitle, SFB_CLR_TEXT);
+    UnicodeSPrint (Detail, sizeof (Detail), L"Status: %r", Status);
+    SfbGfxTextCentred (Y + SfbGfxTextHeight (mGfxScaleTitle) + mGfxPad, Detail,
+                       mGfxScaleHint, SFB_CLR_DIM);
+    SfbGfxTextCentred (SfbGfxHeight () * 3 / 4, L"Press power to continue.",
+                       mGfxScaleHint, SFB_CLR_DIM);
+    SfbWaitForKey (0);
+    return;
+  }
+
   gST->ConOut->SetAttribute (gST->ConOut, SFB_ATTR_NORMAL);
   Print (L"\r\n%s: %r\r\n", What, Status);
   Print (L"Press power to continue.\r\n");
@@ -231,6 +508,12 @@ SfbReportStatus (IN CONST CHAR16 *What, IN EFI_STATUS Status)
 VOID
 SfbShowFastbootMode (VOID)
 {
+  if (SfbGfxLayout ()) {
+    SfbGfxBanner (L"FASTBOOT MODE",
+                  L"Connect USB and use fastboot on the host");
+    return;
+  }
+
   gST->ConOut->SetAttribute (gST->ConOut, SFB_ATTR_TITLE);
   gST->ConOut->ClearScreen (gST->ConOut);
   gST->ConOut->EnableCursor (gST->ConOut, FALSE);
@@ -250,6 +533,29 @@ SfbShowBootingScreen (IN CONST CHAR16 *Name,
                       IN CONST CHAR16 *FilePath,
                       IN BOOLEAN       ClearScreen)
 {
+  if (SfbGfxLayout ()) {
+    CONST CHAR16  *Label = (Name != NULL && Name[0] != L'\0') ? Name : L"...";
+    CONST CHAR16  *FileName = (FilePath != NULL) ? SfbGetFileName (FilePath)
+                                                 : NULL;
+    CHAR16        Line[SFB_DESC_CHARS + 24];
+
+    /*
+     * An unattended default boot must not blank whatever is already on screen
+     * (typically the boot splash); only the menu path clears and announces.
+     */
+    if (!ClearScreen) {
+      return;
+    }
+
+    if (FileName == NULL || !SfbStrCaseEqual (FileName, L"boot.efi")) {
+      UnicodeSPrint (Line, sizeof (Line), L"Booting %s", Label);
+      SfbGfxBanner (Line, SFB_MENU_CREDIT);
+    } else {
+      SfbGfxBanner (L"Starting...", SFB_MENU_CREDIT);
+    }
+    return;
+  }
+
   gST->ConOut->SetAttribute (gST->ConOut, SFB_ATTR_TITLE);
   /*
    * An unattended default boot must not blank whatever is already on screen
@@ -281,6 +587,11 @@ SfbShowBootingScreen (IN CONST CHAR16 *Name,
 VOID
 SfbShowActionScreen (IN CONST CHAR16 *Text)
 {
+  if (SfbGfxLayout ()) {
+    SfbGfxBanner (Text, NULL);
+    return;
+  }
+
   gST->ConOut->SetAttribute (gST->ConOut, SFB_ATTR_TITLE);
   gST->ConOut->ClearScreen (gST->ConOut);
   gST->ConOut->EnableCursor (gST->ConOut, FALSE);
@@ -300,13 +611,17 @@ SfbShowActionScreen (IN CONST CHAR16 *Text)
 VOID
 SfbShowEnteringMenu (VOID)
 {
-  gST->ConOut->SetAttribute (gST->ConOut, SFB_ATTR_TITLE);
-  gST->ConOut->ClearScreen (gST->ConOut);
-  gST->ConOut->EnableCursor (gST->ConOut, FALSE);
+  if (SfbGfxLayout ()) {
+    SfbGfxBanner (L"Entering Boot Menu", SFB_MENU_CREDIT);
+  } else {
+    gST->ConOut->SetAttribute (gST->ConOut, SFB_ATTR_TITLE);
+    gST->ConOut->ClearScreen (gST->ConOut);
+    gST->ConOut->EnableCursor (gST->ConOut, FALSE);
 
-  Print (L"Entering Boot Menu\r\n");
+    Print (L"Entering Boot Menu\r\n");
 
-  gST->ConOut->SetAttribute (gST->ConOut, SFB_ATTR_NORMAL);
+    gST->ConOut->SetAttribute (gST->ConOut, SFB_ATTR_NORMAL);
+  }
 
   /* Wait for the key to be released... */
   gBS->Stall (SFB_ENTER_MENU_DELAY_S * 1000 * 1000);
@@ -318,11 +633,15 @@ SfbShowEnteringMenu (VOID)
 
 /* ---- boot menu ---------------------------------------------------------- */
 
+/* Seconds the root menu waits for input before booting the default entry. */
+#define SFB_AUTO_BOOT_SECONDS  10
+
 STATIC
 VOID
 SfbDrawMenu (IN CONST SFB_MENU_STATE *Menu,
              IN UINTN                Cursor,
-             IN CONST CHAR16         *Title)
+             IN CONST CHAR16         *Title,
+             IN UINT32               Countdown)
 {
   UINTN  Start;
   UINTN  Index;
@@ -331,7 +650,7 @@ SfbDrawMenu (IN CONST SFB_MENU_STATE *Menu,
   SfbBeginScreen (Title, SFB_MENU_CREDIT);
 
   if (Menu->Count == 0) {
-    Print (L"  No boot entries found.\r\n");
+    SfbDrawRow (FALSE, L" ", L"No boot entries found.");
   }
 
   Start = SfbWindowStart (Cursor, Menu->Count, SFB_VISIBLE_ROWS);
@@ -363,10 +682,23 @@ SfbDrawMenu (IN CONST SFB_MENU_STATE *Menu,
   }
 
   if (Last < Menu->Count) {
-    Print (L"    ... %u more\r\n", (UINT32)(Menu->Count - Last));
+    CHAR16  More[40];
+
+    UnicodeSPrint (More, sizeof (More), L"... %u more",
+                   (UINT32)(Menu->Count - Last));
+    SfbDrawRow (FALSE, L" ", More);
   }
 
-  SfbEndScreen (L"Vol Up/Down: move   Power: select");
+  if (Countdown > 0) {
+    CHAR16  Footer[80];
+
+    UnicodeSPrint (Footer, sizeof (Footer),
+                   L"Auto boot in %u s   Vol Up/Down: move   Power: select",
+                   (UINT32)Countdown);
+    SfbEndScreen (Footer);
+  } else {
+    SfbEndScreen (L"Vol Up/Down: move   Power: select");
+  }
 }
 /*
  * Select and persist the preferred mode. The caller owns the authoritative
@@ -467,7 +799,8 @@ SfbRunSubMenu (IN EFI_HANDLE    Volume,
       Rebuild = FALSE;
     }
 
-    SfbDrawMenu (Menu, Cursor, Title);
+    /* Submenus are always interactive: no countdown. */
+    SfbDrawMenu (Menu, Cursor, Title, 0);
 
     /* Same input model as the root menu: volume keys move, power confirms. */
     Key = SfbWaitForKey (0);
@@ -523,6 +856,9 @@ SfbRunBootMenu (IN SFB_BOOT_MODE InitialMode)
   SFB_BOOT_MODE   CurrentMode = InitialMode;
   UINTN           Cursor = 0;
   BOOLEAN         Rebuild = TRUE;
+  BOOLEAN         AutoBooted = FALSE;
+  BOOLEAN         Draw = TRUE;
+  UINT32          Countdown = SFB_AUTO_BOOT_SECONDS;
   SFB_KEY         Key;
   EFI_STATUS      Status;
 
@@ -542,13 +878,52 @@ SfbRunBootMenu (IN SFB_BOOT_MODE InitialMode)
       Cursor = (Menu.DefaultIndex != SFB_NO_INDEX &&
                 Menu.DefaultIndex < Menu.Count) ? Menu.DefaultIndex : 0;
       Rebuild = FALSE;
+      Draw    = TRUE;
     }
 
-    SfbDrawMenu (&Menu, Cursor, L"Boot Menu");
+    if (Draw) {
+      SfbDrawMenu (&Menu, Cursor, L"Boot Menu", Countdown);
+    }
+    Draw = TRUE;
 
-    /* The menu is purely interactive: it waits for a key indefinitely and
-     * never launches anything unattended. */
-    Key = SfbWaitForKey (0);
+    /*
+     * Count down while the user decides. Any key restarts the countdown, so
+     * browsing never boots out from under the user, and an untouched handset
+     * still boots its default entry when the countdown runs out.
+     */
+    Key = SfbWaitForKey ((Countdown > 0) ? 1000 : 0);
+
+    if (Key == SfbKeyTimeout) {
+      if (Countdown > 0) {
+        Countdown--;
+      }
+      /* Console text cannot be repainted cheaply: only the framebuffer menu
+       * redraws once a second. */
+      Draw = SfbGfxReady ();
+
+      if ((Countdown == 0) && !AutoBooted && (Menu.Count > 0)) {
+        UINTN  Idle = (Menu.DefaultIndex != SFB_NO_INDEX &&
+                       Menu.DefaultIndex < Menu.Count) ? Menu.DefaultIndex
+                                                       : Cursor;
+
+        AutoBooted = TRUE;
+        DEBUG ((EFI_D_INFO, "SFB: auto-boot '%s' after %u s idle\n",
+                Menu.Entry[Idle].Desc, (UINT32)SFB_AUTO_BOOT_SECONDS));
+        Status = SfbLaunchEntry (&Menu.Entry[Idle], FALSE, TRUE, CurrentMode);
+        if (EFI_ERROR (Status)) {
+          SfbReportStatus (L"Boot failed", Status);
+        }
+        Rebuild = TRUE;
+      }
+      continue;
+    }
+
+    /*
+     * A key press cancels auto-boot for the rest of the session, including
+     * after submenus: once the user is driving, the menu waits for them.
+     */
+    Countdown  = 0;
+    AutoBooted = TRUE;
 
     if (Key == SfbKeyUp || Key == SfbKeyDown) {
       SfbMoveCursor (&Cursor, Menu.Count, Key);

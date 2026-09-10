@@ -538,11 +538,19 @@ SfbBrowseVolume (IN EFI_HANDLE    Volume,
       SfbDrawRow ((BOOLEAN)(Index == Cursor), Marker, List[Index].Name);
     }
     if (Last < Count) {
-      Print (L"    ... %u more\r\n", (UINT32)(Count - Last));
+      CHAR16  More[48];
+
+      UnicodeSPrint (More, sizeof (More), L"... %u more",
+                     (UINT32)(Count - Last));
+      SfbDrawRow (FALSE, L" ", More);
     }
     if (Truncated) {
-      Print (L"    (directory has more than %u entries; rest not shown)\r\n",
-             (UINT32)SFB_MAX_DIR_ENTRIES);
+      CHAR16  Notice[64];
+
+      UnicodeSPrint (Notice, sizeof (Notice),
+                     L"(more than %u entries; rest not shown)",
+                     (UINT32)SFB_MAX_DIR_ENTRIES);
+      SfbDrawRow (FALSE, L" ", Notice);
     }
 
     SfbEndScreen (L"Vol Up/Down: move   Power: open");

@@ -78,6 +78,7 @@
 #include <Protocol/EFICardInfo.h>
 #include <Protocol/SimpleTextIn.h>
 #include "SuperFbMenu.h"
+#include "SuperFbGfx.h"
 
 /*
  * OPPO/OnePlus "Phoenix" boot watchdog (PhoenixDxe in the platform UEFI FV).
@@ -262,6 +263,12 @@ LinuxLoaderEntry (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
    */
   SfbDisablePhoenixWatchdog ();
 
+  /*
+   * Bring up the graphical menu. When the platform has no usable GOP or font
+   * this is a no-op and every screen keeps its console text rendering.
+   */
+  SfbGfxInit ();
+
   Status = InitThreadUnsafeStack ();
 
   if (Status != EFI_SUCCESS) {
@@ -299,7 +306,9 @@ LinuxLoaderEntry (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
      * Up within the window launches the saved default entry.
      */
     MenuRequested = WaitForVolumeUpKey (1000);
-    DEBUG ((EFI_D_INFO, "SFB: power-on volume-up detected=%u\n", MenuRequested));
+    DEBUG ((EFI_D_INFO,
+            "SFB: power-on volume-up detected=%u (menu is always shown)\n",
+            MenuRequested));
 
     /*
      * Now bring up the embedded FAT/USB stack so both the default entry and the
@@ -330,18 +339,13 @@ LinuxLoaderEntry (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
             "SFB: MARK mode-current mode=%u defaulted=%u\n",
             (UINT32)Mode, (UINT32)ModeDefaulted));
 
-    if (!MenuRequested) {
-      /* No menu key: boot the saved default. This does not return on success;
-       * it only comes back if there is no saved default or the launch failed,
-       * in which case the menu is shown so the user is never stranded. */
-      SfbLaunchDefaultEntry (Mode);
-    }
-
     /*
-     * Reached here because the menu was requested, or there was no default to
-     * boot. Announce it and hold briefly so a still-held volume key is released
-     * before the menu takes input, then run the menu. It only returns TRUE when
-     * the user picked fastboot.
+     * The menu is shown on every boot. It counts down for a few seconds and
+     * boots the saved default entry itself when no key is pressed, so an
+     * untouched handset still comes up while a key keeps the menu alive.
+     * Announce it and hold briefly so a volume key still held from power-on is
+     * released before the menu takes input. It only returns TRUE when the user
+     * picked fastboot.
      */
     SfbShowEnteringMenu ();
     if (!SfbRunBootMenu (Mode)) {

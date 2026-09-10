@@ -75,6 +75,8 @@
 	SuperFbStore.c
 	SuperFbEntries.c
 	SuperFbMenu.c
+	SuperFbGfx.h
+	SuperFbGfx.c
 	SuperFbBrowser.c
 	SuperFbLaunchPolicy.h
 	SuperFbLaunchPolicy.c
@@ -161,6 +163,8 @@
 	gEfiPartTypeSystemPartGuid
 
 [Protocols]
+	gEfiGraphicsOutputProtocolGuid
+	gEfiHiiFontProtocolGuid
 	gEfiSimpleTextInputExProtocolGuid
 	gEfiBlockIoProtocolGuid
 	gEfiLoadedImageProtocolGuid
