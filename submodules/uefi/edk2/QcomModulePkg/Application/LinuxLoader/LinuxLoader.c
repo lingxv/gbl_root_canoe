@@ -146,94 +146,6 @@ SfbDisablePhoenixWatchdog (VOID)
   @retval other             Some error occurs when executing this entry point.
 
  **/
-/*
- * 开机时扫描音量上键（WaitForVolumeDownKey 的镜像）。
- *
- * 先清空输入缓冲区，再用 WaitForEvent 在超时窗口内等待一次真正的音量上键。
- * 关键在于：非目标按键（尤其是开机时按住、随后松开的电源键）会被跳过并继续
- * 等待，而不是结束扫描——所以电源键既不会被误当成输入，也不会遮挡音量键。
- *
- * @param TimeoutMs   扫描窗口（毫秒）
- * @return TRUE(1)     检测到音量上键
- * @return FALSE(0)    超时未检测到
- */
-STATIC UINT8
-WaitForVolumeUpKey (IN UINT32 TimeoutMs)
-{
-  EFI_STATUS    Status;
-  EFI_EVENT     TimerEvent;
-  EFI_EVENT     WaitList[2];
-  UINTN         EventIndex;
-  EFI_INPUT_KEY Key;
-  UINT8         KeyDetected = 0;
-
-  /* 先清空输入缓冲区 */
-  gST->ConIn->Reset (gST->ConIn, FALSE);
-
-  /* 创建定时器事件 */
-  Status = gBS->CreateEvent (
-                  EVT_TIMER,
-                  TPL_CALLBACK,
-                  NULL,
-                  NULL,
-                  &TimerEvent
-                  );
-  if (EFI_ERROR (Status)) {
-    DEBUG ((EFI_D_ERROR, "CreateEvent Timer failed: %r\n", Status));
-    return FALSE;
-  }
-
-  /* 设置定时器：一次性触发，单位为 100ns */
-  Status = gBS->SetTimer (
-                  TimerEvent,
-                  TimerRelative,
-                  (UINT64)TimeoutMs * 10000   /* ms -> 100ns */
-                  );
-  if (EFI_ERROR (Status)) {
-    DEBUG ((EFI_D_ERROR, "SetTimer failed: %r\n", Status));
-    gBS->CloseEvent (TimerEvent);
-    return FALSE;
-  }
-
-  /* 等待事件列表：按键事件 或 定时器超时 */
-  WaitList[0] = gST->ConIn->WaitForKey;
-  WaitList[1] = TimerEvent;
-
-  while (TRUE) {
-    Status = gBS->WaitForEvent (2, WaitList, &EventIndex);
-    if (EFI_ERROR (Status)) {
-      DEBUG ((EFI_D_ERROR, "WaitForEvent failed: %r\n", Status));
-      break;
-    }
-
-    if (EventIndex == 0) {
-      /* 按键事件触发 */
-      Status = gST->ConIn->ReadKeyStroke (gST->ConIn, &Key);
-      if (!EFI_ERROR (Status)) {
-        DEBUG ((EFI_D_INFO, "Key detected: ScanCode=0x%x, UnicodeChar=0x%x\n",
-                Key.ScanCode, Key.UnicodeChar));
-
-        if (Key.ScanCode == SCAN_UP) { /* recovery / boot menu key */
-          /* 检测到音量上键 */
-          KeyDetected = 1;
-          break;
-        }
-        /* 不是目标按键（电源键/音量下键等），忽略并继续等待 */
-        DEBUG ((EFI_D_INFO, "Not volume up key, continue waiting...\n"));
-      }
-    } else {
-      /* 定时器超时 */
-      DEBUG ((EFI_D_INFO, "Timeout: %d ms expired, no volume up key\n",
-              TimeoutMs));
-      break;
-    }
-  }
-
-  /* 清理定时器事件 */
-  gBS->CloseEvent (TimerEvent);
-
-  return KeyDetected;
-}
 
 EFI_STATUS EFIAPI  __attribute__ ( (no_sanitize ("safe-stack")))
 LinuxLoaderEntry (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
@@ -293,22 +205,8 @@ LinuxLoaderEntry (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
   }
 
   {
-    UINT8         MenuRequested;
     SFB_BOOT_MODE  Mode = SfbBootModeAblFakeLocked;
     BOOLEAN        ModeDefaulted = TRUE;
-
-    /*
-     * Scan for Volume Up held at power-on FIRST, before any other init disturbs
-     * the console input. WaitForVolumeUpKey flushes stale input and then waits
-     * for a genuine Volume Up press, skipping every other key (notably the
-     * power key used to switch the device on) rather than being fooled by it.
-     * Volume Up (the official recovery key slot) opens the boot menu; no Volume
-     * Up within the window launches the saved default entry.
-     */
-    MenuRequested = WaitForVolumeUpKey (1000);
-    DEBUG ((EFI_D_INFO,
-            "SFB: power-on volume-up detected=%u (menu is always shown)\n",
-            MenuRequested));
 
     /*
      * Now bring up the embedded FAT/USB stack so both the default entry and the
@@ -340,14 +238,13 @@ LinuxLoaderEntry (IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable)
             (UINT32)Mode, (UINT32)ModeDefaulted));
 
     /*
-     * The menu is shown on every boot. It counts down for a few seconds and
-     * boots the saved default entry itself when no key is pressed, so an
-     * untouched handset still comes up while a key keeps the menu alive.
-     * Announce it and hold briefly so a volume key still held from power-on is
-     * released before the menu takes input. It only returns TRUE when the user
-     * picked fastboot.
+     * The menu is shown on every boot with nothing in front of it: it counts
+     * down for a few seconds and then boots the saved default entry itself
+     * when no key is pressed. Anything already queued is dropped so a key
+     * still held from power-on cannot act on the menu the moment it appears.
+     * It only returns TRUE when the user picked fastboot.
      */
-    SfbShowEnteringMenu ();
+    gST->ConIn->Reset (gST->ConIn, FALSE);
     if (!SfbRunBootMenu (Mode)) {
       Status = EFI_SUCCESS;
       goto stack_guard_update_default;

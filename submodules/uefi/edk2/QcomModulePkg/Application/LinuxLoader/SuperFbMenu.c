@@ -601,36 +601,6 @@ SfbShowActionScreen (IN CONST CHAR16 *Text)
   gST->ConOut->SetAttribute (gST->ConOut, SFB_ATTR_NORMAL);
 }
 
-/*
- * Seconds to hold on the "Entering Boot Menu" screen before the menu starts
- * taking input. Long enough that a volume key held from power-on has been
- * released, so it does not immediately move the menu cursor.
- */
-#define SFB_ENTER_MENU_DELAY_S  3
-
-VOID
-SfbShowEnteringMenu (VOID)
-{
-  if (SfbGfxLayout ()) {
-    SfbGfxBanner (L"Entering Boot Menu", SFB_MENU_CREDIT);
-  } else {
-    gST->ConOut->SetAttribute (gST->ConOut, SFB_ATTR_TITLE);
-    gST->ConOut->ClearScreen (gST->ConOut);
-    gST->ConOut->EnableCursor (gST->ConOut, FALSE);
-
-    Print (L"Entering Boot Menu\r\n");
-
-    gST->ConOut->SetAttribute (gST->ConOut, SFB_ATTR_NORMAL);
-  }
-
-  /* Wait for the key to be released... */
-  gBS->Stall (SFB_ENTER_MENU_DELAY_S * 1000 * 1000);
-
-  /* ...then drop anything typed or held during the wait so it does not leak
-   * into the menu as a spurious keypress. */
-  gST->ConIn->Reset (gST->ConIn, FALSE);
-}
-
 /* ---- boot menu ---------------------------------------------------------- */
 
 /* Seconds the root menu waits for input before booting the default entry. */

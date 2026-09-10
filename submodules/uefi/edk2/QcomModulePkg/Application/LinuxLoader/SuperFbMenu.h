@@ -404,15 +404,6 @@ VOID
 SfbShowFastbootMode (VOID);
 
 /*
- * Clear the console, show "Entering Boot Menu", and hold for a few seconds so
- * a volume key still held from power-on is released before the menu starts
- * taking input. The input buffer is drained afterwards so that held key does
- * not leak in as a spurious keypress.
- */
-VOID
-SfbShowEnteringMenu (VOID);
-
-/*
  * Announce that an entry is being launched, so the menu the user picked from
  * does not stay on screen while the image loads. Title is "Booting <Name>".
  *
