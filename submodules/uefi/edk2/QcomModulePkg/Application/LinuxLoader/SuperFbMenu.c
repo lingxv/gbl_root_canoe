@@ -51,6 +51,8 @@ STATIC UINTN    mGfxFooterY;
 STATIC UINTN    mGfxRowSlot;
 STATIC UINTN    mGfxRowBarH;
 STATIC UINTN    mGfxRowIndex;
+STATIC UINTN    mGfxRowLimit;    /* rows the list actually drew last time */
+STATIC UINTN    mGfxRowBase;     /* extra offset that centres a short list */
 STATIC UINTN    mGfxScaleTitle;
 STATIC UINTN    mGfxScaleRow;
 STATIC UINTN    mGfxScaleHint;
@@ -106,9 +108,14 @@ SfbGfxLayout (VOID)
   if (mGfxPad == 0) {
     mGfxPad = 1;
   }
-  mGfxScaleTitle = SfbGfxScaleFor (Height / 48);
-  mGfxScaleRow   = SfbGfxScaleFor (Height / 64);
-  mGfxScaleHint  = SfbGfxScaleFor (Height / 96);
+  /*
+   * Type sizes were raised from 48/64/96 to 34/40/56. On the 2772 px panel the
+   * old numbers gave a 57 px title and 38 px rows, which read as small and left
+   * the list looking sparse; these give 76 px and 57 px.
+   */
+  mGfxScaleTitle = SfbGfxScaleFor (Height / 34);
+  mGfxScaleRow   = SfbGfxScaleFor (Height / 40);
+  mGfxScaleHint  = SfbGfxScaleFor (Height / 56);
 
   TitleH    = SfbGfxTextHeight (mGfxScaleTitle);
   SubtitleH = SfbGfxTextHeight (mGfxScaleHint);
@@ -123,15 +130,21 @@ SfbGfxLayout (VOID)
     return FALSE;
   }
 
-  Slot = (mGfxContentBottom - mGfxContentTop) / SFB_VISIBLE_ROWS;
+  Slot = (mGfxContentBottom - mGfxContentTop) /
+         (mGfxRowLimit == 0 ? SFB_VISIBLE_ROWS : mGfxRowLimit);
   if (Slot < SfbGfxTextHeight (1) + 2) {
     return FALSE;
   }
 
   mGfxRowSlot = Slot;
-  mGfxRowBarH = SfbGfxTextHeight (mGfxScaleRow) + Slot / 5;
-  if (mGfxRowBarH > Slot) {
-    mGfxRowBarH = Slot;
+  /*
+   * The bar hugs its text. It used to be text height plus a fifth of the slot,
+   * which on this panel drew a 79 px bar around 38 px of text and made every
+   * row look like a wide empty band.
+   */
+  mGfxRowBarH = SfbGfxTextHeight (mGfxScaleRow) + 2 * (mGfxScaleRow + 1) * 3;
+  if (mGfxRowBarH > Slot - mGfxPad / 2) {
+    mGfxRowBarH = Slot - mGfxPad / 2;
   }
   mGfxRowIndex = 0;
   mGfxUi = TRUE;
@@ -143,7 +156,7 @@ STATIC
 UINTN
 SfbGfxRowTop (VOID)
 {
-  return mGfxContentTop + mGfxRowIndex * mGfxRowSlot +
+  return mGfxContentTop + mGfxRowBase + mGfxRowIndex * mGfxRowSlot +
          (mGfxRowSlot - mGfxRowBarH) / 2;
 }
 
@@ -623,11 +636,27 @@ SfbDrawMenu (IN CONST SFB_MENU_STATE *Menu,
     SfbDrawRow (FALSE, L" ", L"No boot entries found.");
   }
 
-  Start = SfbWindowStart (Cursor, Menu->Count, SFB_VISIBLE_ROWS);
-  Last = Start + SFB_VISIBLE_ROWS;
+  /*
+   * Redo the layout against the number of rows this screen will really draw,
+   * so a short list is centred instead of hugging the top edge with a large gap
+   * underneath. The cap keeps long lists inside the panel.
+   */
+  mGfxRowLimit = (Menu->Count > SFB_VISIBLE_ROWS) ? SFB_VISIBLE_ROWS
+                                                  : Menu->Count;
+  if (mGfxRowLimit == 0) {
+    mGfxRowLimit = 1;
+  }
+
+  SfbGfxLayout ();
+
+  Start = SfbWindowStart (Cursor, Menu->Count, mGfxRowLimit);
+  Last = Start + mGfxRowLimit;
   if (Last > Menu->Count) {
     Last = Menu->Count;
   }
+
+  mGfxRowBase = ((mGfxContentBottom - mGfxContentTop) -
+                 ((Last - Start) * mGfxRowSlot)) / 2;
 
   for (Index = Start; Index < Last; Index++) {
     CONST SFB_BOOT_ENTRY  *Entry = &Menu->Entry[Index];
